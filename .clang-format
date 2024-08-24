@@ -1,0 +1,10 @@
+---
+BasedOnStyle: Google
+# BasedOnStyle: Mozilla
+# BasedOnStyle: LLVM
+# BasedOnStyle: WebKit
+---
+Language: Cpp
+IndentWidth: 2
+ColumnLimit: 120
+...
