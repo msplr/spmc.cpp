@@ -151,7 +151,7 @@ ShmTopic<Msg> msgTopic;
 std::atomic<bool> stop{false};
 
 void producer(int cpu) {
-  configThread("producer", 1, cpu);
+  configThread("producer", -1, cpu);
   ShmPublisher<Msg> pub(msgTopic);
   int i = 0;
   while (!stop) {
@@ -215,7 +215,7 @@ int main() {
   threads.emplace_back(consumer, 1);
   threads.emplace_back(consumer, -1);
   threads.emplace_back(consumer, -1);
-  threads.emplace_back(cpuIntensive, 1, 1);
+  threads.emplace_back(cpuIntensive, -1, 1);
   threads.emplace_back(producer, 0);
 
   while (!stop) {
