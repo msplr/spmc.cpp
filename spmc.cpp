@@ -8,6 +8,7 @@
 #include <climits>
 #include <csignal>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <thread>
@@ -62,7 +63,9 @@ struct ShmPublisher {
   }
 
   bool publish() {
-    // TODO: check memory ordering
+    // Release memory order: No reads or writes in the current thread can be reordered after this store.
+    // All writes in the current thread are visible in other threads that acquire the same atomic variable.
+    // Source: https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
     topic_.read_ptr.store(reinterpret_cast<T *>(&getNextMessage()), std::memory_order_release);
 
     // updated the the read pointer, wake up all waiting threads
@@ -100,36 +103,46 @@ struct ShmSubscriber {
   }
 
   std::optional<T> receive(const std::chrono::nanoseconds &timeout) {
-    // Wait until the shared pointer is updated or timeout occurs
+    const T *res = receiveImpl(timeout);
+    if (res == nullptr) {
+      return std::nullopt;
+    }
+    return *res;
+  }
+
+  bool receive(const std::chrono::nanoseconds &timeout, std::function<void(const T &)> &callback) {
+    const T *res = receiveImpl(timeout);
+    if (res == nullptr) {
+      return false;
+    }
+    callback(*res);
+    return true;
+  }
+
+ private:
+  const T *receiveImpl(const std::chrono::nanoseconds &timeout) {
     while (stop.load() == false) {
-      // TODO: check memory order
-      // Try to load the value of the shared pointer
+      // Acquire memory order: No reads or writes in the current thread can be reordered before this load.
+      // All writes in other threads that release the same atomic variable are visible in the current thread.
+      // Source: https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
       T *local_ptr = topic_.read_ptr.load(std::memory_order_acquire);
 
       if (local_ptr != nullptr && local_ptr != last_ptr) {
         last_ptr = local_ptr;
-        T *value = reinterpret_cast<T *>(local_ptr);
-        return *value;
+        return reinterpret_cast<const T *>(local_ptr);
       }
 
-      // Wait on the futex (the pointer) with a timeout until it changes
-      auto secs = std::chrono::duration_cast<std::chrono::seconds>(timeout);
-      auto nanosecs = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout - secs);
-
-      struct timespec ts;
-      ts.tv_sec = secs.count();
-      ts.tv_nsec = nanosecs.count();
-
+      timespec ts = chronoToTimespec(timeout);
       int ret = syscall(SYS_futex, &topic_.read_ptr, FUTEX_WAIT, local_ptr, &ts, nullptr, 0);
 
       if (ret == -1 && errno == ETIMEDOUT) {
-        return std::nullopt;
+        return nullptr;
       } else if (ret == -1 && errno != EAGAIN) {
         fprintf(stderr, "Error in futex wait: %s\n", strerror(errno));
-        return std::nullopt;
+        return nullptr;
       }
     }
-    return std::nullopt;
+    return nullptr;
   }
 
   static timespec chronoToTimespec(const std::chrono::nanoseconds &chrono) {
