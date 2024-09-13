@@ -80,8 +80,8 @@ std::optional<Msg> receive(std::chrono::milliseconds timeout) {
   return std::nullopt;
 }
 
-void producer() {
-  configThread("producer", 42, 0);
+void producer(int prio = 42, int cpu = 0) {
+  configThread("producer", prio, cpu);
   Msg msg;
   msg.value = "hello";
   while (!stop) {
@@ -124,15 +124,14 @@ void interrupt(int cpu) {
   }
 }
 
-int main() {
-  signal(SIGINT, signalCallback);
-
+// cpu pinning case, fixed priorities
+void test0() {
   std::vector<std::thread> threads;
-  threads.emplace_back(producer);
-  threads.emplace_back(consumer, -1, 0); // fast consumer
-  threads.emplace_back(consumer, -1, 1); // slow consumer because of high CPU load
-  threads.emplace_back(cpuIntensive, -1, 1);
-  threads.emplace_back(interrupt, 0);
+  threads.emplace_back(producer, /*prio=*/42, /*cpu=*/0);
+  threads.emplace_back(consumer, /*prio=*/20, /*cpu=*/0);  // high prio consumer
+  threads.emplace_back(consumer, /*prio=*/1, /*cpu=*/1);   // low prio consumer, can miss update
+  threads.emplace_back(cpuIntensive, /*prio=*/2, /*cpu=*/1);
+  threads.emplace_back(interrupt, /*cpu=*/0);  // regularly interrupt producer (makes race condition more likely)
   while (!stop) {
     std::this_thread::sleep_for(200ms);
     printf("%ld messages\n", messageCounter);
@@ -140,6 +139,67 @@ int main() {
 
   for (auto& t : threads) {
     t.join();
+  }
+}
+
+// cpu pinning case
+void test1() {
+  std::vector<std::thread> threads;
+  threads.emplace_back(producer, 42, 0);
+  threads.emplace_back(consumer, -1, 0);  // fast consumer
+  threads.emplace_back(consumer, -1, 1);  // slow consumer because of high CPU load
+  threads.emplace_back(cpuIntensive, -1, 1);
+  threads.emplace_back(interrupt, 0);  // regularly interrupt producer (makes race condition more likely)
+  while (!stop) {
+    std::this_thread::sleep_for(200ms);
+    printf("%ld messages\n", messageCounter);
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+}
+
+// saturated system case
+void test2() {
+  int numCpu = 4;
+  std::vector<std::thread> threads;
+  threads.emplace_back(producer, 42, -1);  // high prio producer
+  threads.emplace_back(consumer, 41, -1);  // high prio consumer
+  threads.emplace_back(consumer, 1, -1);   // low prio consumer
+  for (int cpu = 0; cpu < numCpu; cpu++) {
+    threads.emplace_back(interrupt, cpu);  // make sure threads are interrupted on every cpu
+    threads.emplace_back(cpuIntensive, 10, cpu);
+  }
+  while (!stop) {
+    std::this_thread::sleep_for(200ms);
+    printf("%ld messages\n", messageCounter);
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+}
+
+int main(int argc, char* argv[]) {
+  signal(SIGINT, signalCallback);
+
+  int testCase = 0;
+  if (argc > 1) {
+    testCase = std::atoi(argv[1]);
+  }
+  switch (testCase) {
+    case 0:
+      test0();
+      break;
+    case 1:
+      test1();
+      break;
+    case 2:
+      test2();
+      break;
+    default:
+      break;
   }
   return 0;
 }
