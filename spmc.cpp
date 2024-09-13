@@ -45,15 +45,16 @@ void configThread(const char *name, int priority, int schedAffinity = -1) {
 
 template <typename T>
 struct ShmTopic {
+  enum { NotPublished = -1 };
   T buffer[BUF_SIZE];
-  std::atomic<T *> read_ptr{nullptr};
+  std::atomic<int32_t> index{NotPublished};  // -1 means
   char name[100];
 };
 
 template <typename T>
 struct ShmPublisher {
   ShmTopic<T> &topic_;
-  int write_index = 0;
+  int32_t writeIndex = 0;
 
   ShmPublisher(ShmTopic<T> &topic) : topic_(topic) {}
 
@@ -66,13 +67,13 @@ struct ShmPublisher {
     // Release memory order: No reads or writes in the current thread can be reordered after this store.
     // All writes in the current thread are visible in other threads that acquire the same atomic variable.
     // Source: https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
-    topic_.read_ptr.store(reinterpret_cast<T *>(&getNextMessage()), std::memory_order_release);
+    topic_.index.store(writeIndex, std::memory_order_release);
 
     // updated the the read pointer, wake up all waiting threads
-    int res = syscall(SYS_futex, &topic_.read_ptr, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+    int res = syscall(SYS_futex, &topic_.index, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
 
     // wrap around
-    write_index = (write_index + 1) % BUF_SIZE;
+    writeIndex = (writeIndex + 1) % BUF_SIZE;
 
     if (res == -1) {
       fprintf(stderr, "Error in futex wake\n");
@@ -81,13 +82,13 @@ struct ShmPublisher {
     return true;
   }
 
-  T &getNextMessage() { return topic_.buffer[write_index]; }
+  T &getNextMessage() { return topic_.buffer[writeIndex]; }
 };
 
 template <typename T>
 struct ShmSubscriber {
   ShmTopic<T> &topic_;
-  T *last_ptr = nullptr;
+  int32_t lastIndex = ShmTopic<T>::NotPublished;
   std::atomic<bool> stop{false};
 
   ShmSubscriber(ShmTopic<T> &topic) : topic_(topic) {}
@@ -96,7 +97,7 @@ struct ShmSubscriber {
     stop.store(true);
 
     // Wakes up all waiting threads but that's fine for shutdown case
-    int res = syscall(SYS_futex, &topic_.read_ptr, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+    int res = syscall(SYS_futex, &topic_.index, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
     if (res == -1) {
       fprintf(stderr, "Error in futex wake\n");
     }
@@ -125,15 +126,15 @@ struct ShmSubscriber {
       // Acquire memory order: No reads or writes in the current thread can be reordered before this load.
       // All writes in other threads that release the same atomic variable are visible in the current thread.
       // Source: https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
-      T *local_ptr = topic_.read_ptr.load(std::memory_order_acquire);
+      int32_t localIndex = topic_.index.load(std::memory_order_acquire);
 
-      if (local_ptr != nullptr && local_ptr != last_ptr) {
-        last_ptr = local_ptr;
-        return reinterpret_cast<const T *>(local_ptr);
+      if (localIndex != -1 && localIndex != lastIndex) {
+        lastIndex = localIndex;
+        return &topic_.buffer[localIndex];
       }
 
       timespec ts = chronoToTimespec(timeout);
-      int ret = syscall(SYS_futex, &topic_.read_ptr, FUTEX_WAIT, local_ptr, &ts, nullptr, 0);
+      int ret = syscall(SYS_futex, &topic_.index, FUTEX_WAIT, localIndex, &ts, nullptr, 0);
 
       if (ret == -1 && errno == ETIMEDOUT) {
         return nullptr;
